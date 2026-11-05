@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from .database import Base, engine
 from .routes.movimentacoes import router as movimentacoes_router
 
@@ -21,4 +22,5 @@ def inicio():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # BUG PROPOSITAL (v1.1.0): simula uma versao quebrada para testar o rollback.
+    return JSONResponse(status_code=500, content={"status": "erro"})
