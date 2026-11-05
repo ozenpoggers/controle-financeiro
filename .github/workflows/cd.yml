@@ -1,0 +1,106 @@
+name: CD
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:            # usado para rollback manual
+    inputs:
+      tag:
+        description: "Versão a implantar (ex: 1.0.0)"
+        required: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  publish:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-homologacao:
+    needs: publish
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: homologacao
+    permissions:
+      contents: read
+      packages: read
+    env:
+      POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Definir versão nova e anterior
+        id: v
+        env:
+          RAW: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          NEW="${RAW#v}"
+          PREV=$(git tag --list 'v*' --sort=-v:refname | grep -vx "v${NEW}" | head -n1)
+          echo "new=${NEW}" >> "$GITHUB_OUTPUT"
+          echo "prev=${PREV#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy em homologação (simulado)
+        run: |
+          export IMAGE=${{ env.IMAGE }} TAG=${{ steps.v.outputs.new }}
+          docker compose pull api
+          docker compose up -d --no-build
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:8000/health && exit 0
+            sleep 3
+          done
+          docker compose logs api
+          exit 1
+
+      - name: Rollback automático
+        if: failure() && steps.v.outputs.prev != ''
+        run: |
+          echo "Falha na versão ${{ steps.v.outputs.new }}. Voltando para ${{ steps.v.outputs.prev }}"
+          export IMAGE=${{ env.IMAGE }} TAG=${{ steps.v.outputs.prev }}
+          docker compose pull api
+          docker compose up -d --no-build
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:8000/health && exit 0
+            sleep 3
+          done
+          exit 1
