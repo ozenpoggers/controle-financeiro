@@ -50,7 +50,6 @@ def test_inicio():
     assert resposta.json()["mensagem"] == "API Controle Financeiro funcionando!"
 
 
-@pytest.mark.xfail(strict=True, reason="v1.1.0 quebra o /health de proposito para testar o rollback")
 def test_health():
     resposta = client.get("/health")
 
